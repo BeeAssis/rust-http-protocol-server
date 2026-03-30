@@ -15,8 +15,8 @@ fn handle_connection(mut stream: TcpStream){
     let parts: Vec<&[u8]> = request_data.split(|&c| c==b' ').collect();
 
     let response = match parts[1]{
-        b"/" => "HTTP/1.1 200 OK \r\n\r\n",
-        _ =>"HTTP/1.1 404 Not Found \r\n\r\n",
+        b"/" => "HTTP/1.1 200 OK\r\n\r\n",
+        _ =>"HTTP/1.1 404 Not Found\r\n\r\n",
     };
 
     stream.write_all(response.as_bytes()).unwrap();
