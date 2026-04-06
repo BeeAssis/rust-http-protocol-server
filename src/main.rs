@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-
+use std::thread::{spawn, sleep};
+use std::time::Duration;
 struct Request {
     method: String,
     path: String,
@@ -52,6 +53,9 @@ fn text_response(body: &str) -> String {
 }
 
 fn handle_connection(mut stream: TcpStream) {
+    println!("started handling connection");
+    sleep(Duration::from_secs(5));
+
     let mut buffer = [0; 1024];
     let bytes_read = stream.read(&mut buffer).unwrap();
 
@@ -94,7 +98,10 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_connection(stream),
+            Ok(stream) =>{
+                spawn(move||handle_connection(stream));
+
+            },
             Err(e) => println!("error: {}", e),
         }
     }
