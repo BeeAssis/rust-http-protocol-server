@@ -9,40 +9,71 @@ struct Request {
     path: String,
     version: String,
     headers: HashMap<String, String>,
+    body: Vec<u8>,
 }
 
-fn parse_request(request_str: &str) -> Option<Request> {
-    let lines: Vec<&str> = request_str.split("\r\n").collect();
+fn parse_request(request: &[u8]) -> Option<Request> {
+
+    if request.len() < 4 {
+        return None;
+    }
+    
+
+    let mut header_end = None;
+
+    for i in 0..request.len()-3{
+        if request[i] == b'\r'
+        && request[i + 1] == b'\n'
+        && request[i + 2] == b'\r'
+        && request[i + 3] == b'\n'
+    {
+        header_end = Some(i);
+        break;
+    }
+
+ }
+  let header_end = match header_end {
+    Some(i) => i,
+    None => return None,
+    };
+
+
+    let headers_bytes = &request[..header_end];
+    let body_bytes = &request[header_end+4..];
+
+    let headers_str = std::str::from_utf8(headers_bytes).ok()?;
+    let lines: Vec<&str> = headers_str.split("\r\n").collect();
 
     let request_line = lines.first()?;
     let parts: Vec<&str> = request_line.split_whitespace().collect();
 
-    if parts.len() != 3 {
-        return None;
+    if parts.len() !=3{
+       return None;
     }
 
     let method = parts[0].to_string();
     let path = parts[1].to_string();
     let version = parts[2].to_string();
 
-    let mut headers = HashMap::new();
+    let mut headers_map = HashMap::new();
 
     for line in lines.iter().skip(1) {
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some((name, value)) = line.split_once(": ") {
-            headers.insert(name.to_ascii_lowercase(), value.to_string());
+        if let Some((name,value)) = line.split_once(": "){
+            headers_map.insert(name.to_ascii_lowercase(),value.to_string());
         }
     }
 
-    Some(Request {
+     Some(Request {
         method,
         path,
         version,
-        headers,
+        headers: headers_map,
+        body: body_bytes.to_vec(),
     })
+
+
+
+
 }
 
 fn text_response(body: &str) -> Vec<u8> {
@@ -54,6 +85,14 @@ fn text_response(body: &str) -> Vec<u8> {
     let mut response = headers.into_bytes();
     response.extend_from_slice(body.as_bytes());
     response
+}
+
+fn create_file_response(path:&str, body:&[u8]) ->Vec<u8>{
+    match fs::write(path, body){
+        Ok(_) => b"HTTP/1.1 201 Created\r\n\r\n".to_vec(),
+        Err(_) => b"HTTP/1.1 500 Internal Server Error\r\n\r\n".to_vec(),
+    }
+
 }
 
 fn file_response(path: &str) -> Vec<u8> {
@@ -72,22 +111,23 @@ fn file_response(path: &str) -> Vec<u8> {
 }
 
 fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
+
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
 
     let mut buffer = [0; 1024];
     let bytes_read = stream.read(&mut buffer).unwrap();
 
     let request_data = &buffer[..bytes_read];
-    let request_str = std::str::from_utf8(request_data).unwrap();
 
-    let request = match parse_request(request_str) {
+    let request = match parse_request(request_data){
         Some(req) => req,
-        None => {
+        None =>{
             stream.write_all(BAD_REQUEST).unwrap();
             stream.flush().unwrap();
             return;
         }
     };
+
 
     let response = if request.path == "/" {
         b"HTTP/1.1 200 OK\r\n\r\n".to_vec()
@@ -103,7 +143,14 @@ fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
     } else if let Some(filename) = request.path.strip_prefix("/files/") {
         if let Some(dir) = directory.as_ref() {
             let file_path = format!("{}{}", dir, filename);
-            file_response(&file_path)
+
+            if request.method == "GET"{
+                file_response(&file_path)
+            }else if request.method == "POST"{
+                 create_file_response(&file_path,&request.body)
+            }else{
+                 b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
+            }    
         } else {
             b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
         }
