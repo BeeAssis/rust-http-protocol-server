@@ -37,6 +37,7 @@ fn get_complete_request_len(buffer: &[u8]) -> Option<usize> {
 
     Some(header_end + 4 + content_length)
 }
+
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 4 {
         return None;
@@ -56,23 +57,19 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 fn parse_request(request: &[u8]) -> Option<Request> {
-
     let header_end = find_header_end(request)?;
 
-    
     let headers_bytes = &request[..header_end];
     let body_bytes = &request[header_end + 4..];
-
 
     let headers_str = std::str::from_utf8(headers_bytes).ok()?;
     let lines: Vec<&str> = headers_str.split("\r\n").collect();
 
-
     let request_line = lines.first()?;
     let parts: Vec<&str> = request_line.split_whitespace().collect();
 
-    if parts.len() !=3{
-       return None;
+    if parts.len() != 3 {
+        return None;
     }
 
     let method = parts[0].to_string();
@@ -82,22 +79,18 @@ fn parse_request(request: &[u8]) -> Option<Request> {
     let mut headers_map = HashMap::new();
 
     for line in lines.iter().skip(1) {
-        if let Some((name,value)) = line.split_once(": "){
-            headers_map.insert(name.to_ascii_lowercase(),value.to_string());
+        if let Some((name, value)) = line.split_once(": ") {
+            headers_map.insert(name.to_ascii_lowercase(), value.to_string());
         }
     }
 
-     Some(Request {
+    Some(Request {
         method,
         path,
         version,
         headers: headers_map,
         body: body_bytes.to_vec(),
     })
-
-
-
-
 }
 
 fn text_response(body: &str) -> Vec<u8> {
@@ -111,12 +104,11 @@ fn text_response(body: &str) -> Vec<u8> {
     response
 }
 
-fn create_file_response(path:&str, body:&[u8]) ->Vec<u8>{
-    match fs::write(path, body){
+fn create_file_response(path: &str, body: &[u8]) -> Vec<u8> {
+    match fs::write(path, body) {
         Ok(_) => b"HTTP/1.1 201 Created\r\n\r\n".to_vec(),
         Err(_) => b"HTTP/1.1 500 Internal Server Error\r\n\r\n".to_vec(),
     }
-
 }
 
 fn file_response(path: &str) -> Vec<u8> {
@@ -134,7 +126,17 @@ fn file_response(path: &str) -> Vec<u8> {
     }
 }
 
+fn add_connection_close_header(mut response: Vec<u8>) -> Vec<u8> {
+    if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+        let mut new_response = Vec::with_capacity(response.len() + "Connection: close\r\n".len());
+        new_response.extend_from_slice(&response[..pos]);
+        new_response.extend_from_slice(b"\r\nConnection: close");
+        new_response.extend_from_slice(&response[pos..]);
+        response = new_response;
+    }
 
+    response
+}
 
 fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
@@ -173,7 +175,7 @@ fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
                 .get("connection")
                 .is_some_and(|value| value.eq_ignore_ascii_case("close"));
 
-            let response = if request.path == "/" {
+            let mut response = if request.path == "/" {
                 b"HTTP/1.1 200 OK\r\n\r\n".to_vec()
             } else if request.path.starts_with("/echo/") {
                 let body = &request.path[6..];
@@ -201,6 +203,10 @@ fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
             } else {
                 b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
             };
+
+            if should_close {
+                response = add_connection_close_header(response);
+            }
 
             if stream.write_all(&response).is_err() {
                 return;
