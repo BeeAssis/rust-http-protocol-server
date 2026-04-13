@@ -12,37 +12,61 @@ struct Request {
     body: Vec<u8>,
 }
 
-fn parse_request(request: &[u8]) -> Option<Request> {
+fn get_complete_request_len(buffer: &[u8]) -> Option<usize> {
+    let header_end = find_header_end(buffer)?;
 
-    if request.len() < 4 {
-        return None;
-    }
-    
-
-    let mut header_end = None;
-
-    for i in 0..request.len()-3{
-        if request[i] == b'\r'
-        && request[i + 1] == b'\n'
-        && request[i + 2] == b'\r'
-        && request[i + 3] == b'\n'
-    {
-        header_end = Some(i);
-        break;
-    }
-
- }
-  let header_end = match header_end {
-    Some(i) => i,
-    None => return None,
-    };
-
-
-    let headers_bytes = &request[..header_end];
-    let body_bytes = &request[header_end+4..];
+    let headers_bytes = &buffer[..header_end];
+    let body_bytes = &buffer[header_end + 4..];
 
     let headers_str = std::str::from_utf8(headers_bytes).ok()?;
     let lines: Vec<&str> = headers_str.split("\r\n").collect();
+
+    let mut content_length = 0usize;
+
+    for line in lines.iter().skip(1) {
+        if let Some((name, value)) = line.split_once(": ") {
+            if name.eq_ignore_ascii_case("Content-Length") {
+                content_length = value.parse::<usize>().ok()?;
+            }
+        }
+    }
+
+    if body_bytes.len() < content_length {
+        return None;
+    }
+
+    Some(header_end + 4 + content_length)
+}
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 4 {
+        return None;
+    }
+
+    for i in 0..bytes.len() - 3 {
+        if bytes[i] == b'\r'
+            && bytes[i + 1] == b'\n'
+            && bytes[i + 2] == b'\r'
+            && bytes[i + 3] == b'\n'
+        {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+fn parse_request(request: &[u8]) -> Option<Request> {
+
+    let header_end = find_header_end(request)?;
+
+    
+    let headers_bytes = &request[..header_end];
+    let body_bytes = &request[header_end + 4..];
+
+
+    let headers_str = std::str::from_utf8(headers_bytes).ok()?;
+    let lines: Vec<&str> = headers_str.split("\r\n").collect();
+
 
     let request_line = lines.first()?;
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -110,56 +134,89 @@ fn file_response(path: &str) -> Vec<u8> {
     }
 }
 
+
+
 fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
-
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+    let mut incoming_bytes: Vec<u8> = Vec::new();
 
-    let mut buffer = [0; 1024];
-    let bytes_read = stream.read(&mut buffer).unwrap();
+    loop {
+        let mut temp_buffer = [0; 1024];
 
-    let request_data = &buffer[..bytes_read];
+        let num_bytes_read = match stream.read(&mut temp_buffer) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
 
-    let request = match parse_request(request_data){
-        Some(req) => req,
-        None =>{
-            stream.write_all(BAD_REQUEST).unwrap();
-            stream.flush().unwrap();
-            return;
+        incoming_bytes.extend_from_slice(&temp_buffer[..num_bytes_read]);
+
+        loop {
+            let request_len = match get_complete_request_len(&incoming_bytes) {
+                Some(len) => len,
+                None => break,
+            };
+
+            let request_data = &incoming_bytes[..request_len];
+
+            let request = match parse_request(request_data) {
+                Some(req) => req,
+                None => {
+                    let _ = stream.write_all(BAD_REQUEST);
+                    let _ = stream.flush();
+                    return;
+                }
+            };
+
+            let should_close = request
+                .headers
+                .get("connection")
+                .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+
+            let response = if request.path == "/" {
+                b"HTTP/1.1 200 OK\r\n\r\n".to_vec()
+            } else if request.path.starts_with("/echo/") {
+                let body = &request.path[6..];
+                text_response(body)
+            } else if request.path == "/user-agent" {
+                if let Some(user_agent) = request.headers.get("user-agent") {
+                    text_response(user_agent)
+                } else {
+                    b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec()
+                }
+            } else if let Some(filename) = request.path.strip_prefix("/files/") {
+                if let Some(dir) = directory.as_ref() {
+                    let file_path = format!("{}/{}", dir.trim_end_matches('/'), filename);
+
+                    if request.method == "GET" {
+                        file_response(&file_path)
+                    } else if request.method == "POST" {
+                        create_file_response(&file_path, &request.body)
+                    } else {
+                        b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
+                    }
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
+                }
+            } else {
+                b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
+            };
+
+            if stream.write_all(&response).is_err() {
+                return;
+            }
+
+            if stream.flush().is_err() {
+                return;
+            }
+
+            incoming_bytes.drain(..request_len);
+
+            if should_close {
+                return;
+            }
         }
-    };
-
-
-    let response = if request.path == "/" {
-        b"HTTP/1.1 200 OK\r\n\r\n".to_vec()
-    } else if request.path.starts_with("/echo/") {
-        let body = &request.path[6..];
-        text_response(body)
-    } else if request.path == "/user-agent" {
-        if let Some(user_agent) = request.headers.get("user-agent") {
-            text_response(user_agent)
-        } else {
-            b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec()
-        }
-    } else if let Some(filename) = request.path.strip_prefix("/files/") {
-        if let Some(dir) = directory.as_ref() {
-            let file_path = format!("{}{}", dir, filename);
-
-            if request.method == "GET"{
-                file_response(&file_path)
-            }else if request.method == "POST"{
-                 create_file_response(&file_path,&request.body)
-            }else{
-                 b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
-            }    
-        } else {
-            b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
-        }
-    } else {
-        b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
-    };
-
-    stream.write_all(&response).unwrap();
-    stream.flush().unwrap();
+    }
 }
 
 fn main() {
