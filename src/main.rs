@@ -12,6 +12,13 @@ struct Request {
     body: Vec<u8>,
 }
 
+enum Encoding {
+    Gzip,
+    Brotli,
+    Deflate,
+    Zstd,
+}
+
 fn get_complete_request_len(buffer: &[u8]) -> Option<usize> {
     let header_end = find_header_end(buffer)?;
 
@@ -138,6 +145,69 @@ fn add_connection_close_header(mut response: Vec<u8>) -> Vec<u8> {
     response
 }
 
+fn parse_encoding(token: &str) -> Option<Encoding> {
+    let token = token.trim();
+
+    if token.eq_ignore_ascii_case("gzip") {
+        Some(Encoding::Gzip)
+    } else if token.eq_ignore_ascii_case("br") {
+        Some(Encoding::Brotli)
+    } else if token.eq_ignore_ascii_case("deflate") {
+        Some(Encoding::Deflate)
+    } else if token.eq_ignore_ascii_case("zstd") {
+        Some(Encoding::Zstd)
+    } else {
+        None
+    }
+
+}
+
+fn select_encoding(request: &Request) -> Option<Encoding> {
+    let header = request.headers.get("accept-encoding")?;
+
+    for token in header.split(',') {
+        if let Some(compression_scheme) = parse_encoding(token) {
+            match compression_scheme {
+                Encoding::Gzip => return Some(Encoding::Gzip),
+                Encoding::Brotli => {
+
+                },
+                Encoding::Deflate =>{
+
+                },
+                Encoding::Zstd => {
+
+                },
+            }
+        }
+    }
+
+    None
+}
+
+fn encoded_text_response(body: &str, encoding: Encoding) -> Vec<u8> {
+    let encoding_str = match encoding {
+        Encoding::Gzip => "gzip",
+        Encoding::Brotli => "br",
+        Encoding::Deflate => "deflate",
+        Encoding::Zstd => "zstd",
+    };
+
+  let headers = format!(
+      "HTTP/1.1 200 OK\r\n\
+  Content-Encoding: {}\r\n\
+  Content-Type: text/plain\r\n\
+  Content-Length: {}\r\n\
+  \r\n",
+        encoding_str,
+        body.len()
+);
+
+    let mut response = headers.into_bytes();
+    response.extend_from_slice(body.as_bytes());
+    response
+}
+
 fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
     let mut incoming_bytes: Vec<u8> = Vec::new();
@@ -179,14 +249,21 @@ fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
                 b"HTTP/1.1 200 OK\r\n\r\n".to_vec()
             } else if request.path.starts_with("/echo/") {
                 let body = &request.path[6..];
-                text_response(body)
+                if let Some(Encoding::Gzip) = select_encoding(&request){
+                    encoded_text_response(body,Encoding::Gzip)
+
+                }else{
+                    text_response(body)
+
+                }
+           
             } else if request.path == "/user-agent" {
                 if let Some(user_agent) = request.headers.get("user-agent") {
                     text_response(user_agent)
                 } else {
                     b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec()
                 }
-            } else if let Some(filename) = request.path.strip_prefix("/files/") {
+            }else if let Some(filename) = request.path.strip_prefix("/files/") {
                 if let Some(dir) = directory.as_ref() {
                     let file_path = format!("{}/{}", dir.trim_end_matches('/'), filename);
 
