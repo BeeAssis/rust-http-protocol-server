@@ -3,6 +3,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::spawn;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 
 struct Request {
     method: String,
@@ -186,12 +189,15 @@ fn select_encoding(request: &Request) -> Option<Encoding> {
 }
 
 fn encoded_text_response(body: &str, encoding: Encoding) -> Vec<u8> {
+    
     let encoding_str = match encoding {
         Encoding::Gzip => "gzip",
         Encoding::Brotli => "br",
         Encoding::Deflate => "deflate",
         Encoding::Zstd => "zstd",
     };
+
+    let compressed_body = gzip_compress(body.as_bytes());
 
   let headers = format!(
       "HTTP/1.1 200 OK\r\n\
@@ -200,13 +206,23 @@ fn encoded_text_response(body: &str, encoding: Encoding) -> Vec<u8> {
   Content-Length: {}\r\n\
   \r\n",
         encoding_str,
-        body.len()
-);
+        compressed_body.len()
+   );
 
     let mut response = headers.into_bytes();
-    response.extend_from_slice(body.as_bytes());
+    response.extend_from_slice(&compressed_body);
     response
 }
+
+fn gzip_compress(data: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+
+    encoder.write_all(data).unwrap();
+
+    encoder.finish().unwrap()
+
+}
+
 
 fn handle_connection(mut stream: TcpStream, directory: Option<String>) {
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
